@@ -1,0 +1,22 @@
+[Unit]
+Description=Stork Comfofan S 0-10 V control (Home Assistant MQTT)
+Requires=pigpiod.service
+After=pigpiod.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+#User=homeautomation
+DynamicUser=yes
+ExecStart=/usr/local/share/homeautomation/.venv/bin/python /usr/local/share/homeautomation/comfofan_mqtt.py
+EnvironmentFile=/etc/homeautomation/comfofan.env
+Environment=PYTHONUNBUFFERED=1
+ExecStopPost=-+/usr/bin/pinctrl set 23 op dl
+ExecStopPost=-+/usr/bin/pinctrl set 18 op dl
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

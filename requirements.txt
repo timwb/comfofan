@@ -1,0 +1,4 @@
+# Python dependencies for comfofan_mqtt.py and the bench tools.
+# The pigpio daemon itself comes from apt: sudo apt install pigpio
+pigpio>=1.78
+paho-mqtt>=1.6,<3
