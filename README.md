@@ -1,20 +1,18 @@
 # comfofan
 
 Control the speed of a **Zehnder / Stork Comfofan S** ventilation unit from Home Assistant, using a
-Raspberry Pi that drives the unit's 0–10 V speed input, electrically isolated, over MQTT.
+Raspberry Pi that drives the unit's 0–10 V (or 1–10 V) speed input, electrically isolated, over MQTT with Home Assistant integration.
 
 A relay picks the signal that goes to the unit:
 
-- **DAC** (relay on): a PWM-to-0–10 V module sets the speed that Home Assistant asks for.
-- **Divider** (relay off): a fixed resistor divider or 20k potentiometer gives the unit's normal
-  default speed (about 4.8 V).
+- **DAC** (relay on): Home Assistant is in control. A PWM-to-0–10 V module sets the speed that
+  Home Assistant asks for, or 0 V when Home Assistant turns the fan off.
+- **Divider fallback** (relay off): Home Assistant is not in control. A fixed resistor divider or 20k
+  potentiometer gives the unit's normal default speed.
 
 The relay is off when nothing powers it. If the Pi, the script or the power fails, the unit falls
 back to its default speed. It never stops. The Pi side and the 12 V side are galvanically
 isolated.
-
-> **Status:** the circuit works on a breadboard. The scripts have been tested only against
-> stand-ins for pigpio and MQTT, not yet on a real Pi. See [Open items](#open-items).
 
 ## How it works
 
@@ -39,6 +37,8 @@ The full schematic, bill of materials and reference tables are in
 I have one of these at home and want to control it remotely based on other inputs in Home Assistant,
 Such as indoor air quality, outdoor temperature, heatpump activity, etc.
 
+The name `mv` refers to mechanical ventilation. But of course you can use this with any device that takes a 0-10v input with its own voltage source.
+
 ## Warnings
 
 - **Never connect Pi GND to 12 V GND.** U1 and K1 are the only parts that cross the isolation
@@ -47,14 +47,19 @@ barrier.
 - The 12 V side draws about 0.7 mA with the divider selected and about 3.3 mA with the DAC selected.
   A comfofan S can source 20mA.
 
-## Raspberry Pi setup
+## Requirements
 
-This project was designed for a **Raspberry Pi**. It currently uses the pigpio daemon.
+- A Raspberry Pi <5. The pigpio daemon does not work on a Pi 5.
+- The pigpio daemon (from apt) and an MQTT broker
+- The Python packages in [`requirements.txt`](requirements.txt): the pigpio client library and
+  paho-mqtt (1.x or 2.x), installed in a venv
+
+## Raspberry Pi setup
 
 1. Install the pigpio daemon and enable it:
 
    ```sh
-   sudo apt install pigpio
+   sudo apt install pigpio python3-venv
    sudo systemctl enable --now pigpiod
    ```
 
@@ -70,85 +75,49 @@ This project was designed for a **Raspberry Pi**. It currently uses the pigpio d
 
 3. Reboot.
 
-## Running in a virtual environment
-
-The Python dependencies are listed in [`requirements.txt`](requirements.txt): the pigpio client
-library and paho-mqtt (1.x or 2.x). Install them in a virtual environment, not system-wide.
-The pigpio daemon itself comes from apt (see [Raspberry Pi setup](#raspberry-pi-setup)).
-
-To try the scripts by hand from a clone of this repository:
-
-```sh
-sudo apt install python3-venv
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
-Then run any script with the venv's Python. You don't need to activate the venv first:
-
-```sh
-.venv/bin/python mv-interactive.py
-```
-
-To run the service in the foreground, pass the broker settings as environment variables:
-
-```sh
-MQTT_HOST=localhost MQTT_USER=comfofan MQTT_PASSWORD=change-me \
-  .venv/bin/python comfofan_mqtt.py
-```
-
-Press Ctrl+C to stop it. The script selects the divider on the way out. Stop the systemd
-service first if it is installed (`sudo systemctl stop comfofan`), so the two don't fight over
-the pins.
-
 ## Installation
 
-The systemd unit expects the script and a virtual environment in
-`/opt/comfofan/`, running as the user `homeautomation`.
+In these examples everything lives under `/opt/comfofan/`, with its own virtual environment, owned by root:
 
 ```sh
-sudo mkdir -p /opt/comfofan /etc/homeautomation
-sudo cp comfofan_mqtt.py requirements.txt /opt/comfofan/
+cd ~/src/comfofan
+sudo install -d /opt/comfofan
+sudo cp comfofan_mqtt.py requirements.txt README.md /opt/comfofan/
 sudo python3 -m venv /opt/comfofan/.venv
-sudo /opy/comfofan/.venv/bin/pip install \
-  -r /opt/comfofan/requirements.txt
+sudo /opt/comfofan/.venv/bin/pip install -r /opt/comfofan/requirements.txt
+sudo chown -R root:root /opt/comfofan && sudo chmod -R go+rX /opt/comfofan
 ```
-
-The unit starts the script with `/opt/comfofan/.venv/bin/python`, so it
-always uses this venv.
 
 To update later, copy the new `comfofan_mqtt.py` (and `requirements.txt`, if it changed), run the
 `pip install` line again and restart: `sudo systemctl restart comfofan`.
 
-### Configuration
+## Configuration
 
-Create `/etc/homeautomation/comfofan.env` with your broker settings:
+`comfofan_mqtt.py` has no command-line options. Its settings are environment variables: under
+systemd they come from `/etc/homeautomation/comfofan.env` via `EnvironmentFile=`. Start from the
+commented template:
 
 ```sh
-MQTT_HOST=localhost
-MQTT_PORT=1883
-MQTT_USER=comfofan
-MQTT_PASSWORD=change-me
-HA_DISCOVERY_PREFIX=homeassistant
+sudo install -d -m 755 /etc/homeautomation
+sudo install -m 600 -o root -g root comfofan.env.example /etc/homeautomation/comfofan.env
+sudoedit /etc/homeautomation/comfofan.env
 ```
 
-| Variable | Default | Meaning |
+| Key | Default | Description |
 | --- | --- | --- |
+| `COMFOFAN_VOLTAGE_RANGE` | `0-10` | Speed input range of the unit: `0-10` or `1-10`, see [Home Assistant](#home-assistant). Any other value exits with code 2 |
 | `MQTT_HOST` | `localhost` | MQTT broker host |
 | `MQTT_PORT` | `1883` | MQTT broker port |
-| `MQTT_USER` | none | Broker user name. Leave empty for no login |
-| `MQTT_PASSWORD` | none | Broker password |
+| `MQTT_USERNAME` | empty | Broker user name. Leave empty for no login |
+| `MQTT_PASSWORD` | empty | Broker password |
 | `HA_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant MQTT discovery prefix |
 
-The file holds a password, so make it readable by root only. systemd reads it as root, so the
-service user does not need access:
+`MQTT_USER`, the old name of `MQTT_USERNAME`, still works but logs a warning. Rename it in the file.
 
-```sh
-sudo chown root:root /etc/homeautomation/comfofan.env
-sudo chmod 600 /etc/homeautomation/comfofan.env
-```
+The file holds a password, so it is readable by root only (`root:root 0600`). systemd reads it as
+root, so the service user does not need access.
 
-### Start the service
+## systemd
 
 ```sh
 sudo cp comfofan.service /etc/systemd/system/
@@ -157,22 +126,59 @@ sudo systemctl enable --now comfofan
 journalctl -u comfofan -f
 ```
 
-The unit calls `/usr/bin/pinctrl` when it stops (see [Fail-safe](#fail-safe)). Check the path
-with `which pinctrl`. On Raspberry Pi OS Bullseye or older, replace those lines with
-`raspi-gpio set 23 op dl` and `raspi-gpio set 18 op dl`.
+What [`comfofan.service`](comfofan.service) does:
+
+- **Base path:** `WorkingDirectory=/opt/comfofan`, and the unit starts `.venv/bin/python comfofan_mqtt.py`
+  relative to it, so it always uses this venv. If you install elsewhere, change that line and the
+  `Documentation=` line.
+- **Unprivileged user:** `DynamicUser=yes` gives each start a transient user, so no system account
+  is needed. The script reaches the pins through pigpiod (TCP on localhost:8888), so it needs no
+  extra groups or device access.
+- **Requires pigpiod:** it starts after `pigpiod.service`, and stopping pigpiod also stops it.
+- **Watchdog and fail-safe:** `Type=notify` with a 30 s watchdog, and `ExecStopPost=` lines that drive
+  the pins low after any stop. See [Fail-safe](#fail-safe).
+- **Restarts:** after a failure, 5 s later. A configuration error (exit code 2, e.g. an invalid
+  `COMFOFAN_VOLTAGE_RANGE`) is not restarted; the output stays on the divider.
+- **Hardening:** a read-only filesystem, no home directories, no capabilities, a system call filter
+  and more (`systemd-analyze security comfofan`). `PrivateDevices=` and `ProtectClock=` are
+  deliberately off: they restrict device access for the whole unit, including the `ExecStopPost=`
+  commands, so `pinctrl` could no longer reach the GPIO registers and the fail-safe would stop working.
+- **Read-only install:** the service can't write `__pycache__` (`PYTHONDONTWRITEBYTECODE=1`).
+  Optionally pre-compile after each install:
+  `sudo /opt/comfofan/.venv/bin/python -m compileall -q /opt/comfofan`.
+
+The unit calls `/usr/bin/pinctrl` when it stops. Check the path with `which pinctrl`. On Raspberry
+Pi OS Bullseye or older, replace those lines with `raspi-gpio set 23 op dl` and
+`raspi-gpio set 18 op dl`.
+
+After installing, test the crash path: `sudo systemctl kill -s KILL comfofan` should drop the relay
+immediately.
 
 ## Home Assistant
 
 The service registers itself through MQTT discovery. A fan entity appears on the device
 **Stork Comfofan S Ventilation Unit**.
 
-| Action in Home Assistant | Result |
-| --- | --- |
-| Fan on at N % | DAC selected, output N/10 V (100 % = 10 V) |
-| Fan on, no percentage | Resumes the last speed (50 % after a restart) |
-| Fan off, or 0 % | Divider selected: the unit runs at its default speed |
+| Action in Home Assistant | Relay | Output |
+| --- | --- | --- |
+| Fan on at N % | DAC | N % of the voltage range, see below |
+| Fan on, no percentage | DAC | Resumes the last speed (50 % after a restart) |
+| Fan off, or 0 % | DAC | 0 V: the fan is really off |
+| Preset **Unit default** | Divider | The unit's hardware default speed; Home Assistant is not in control |
 
-"Off" does not stop the ventilation. It returns the unit to its hardware default.
+The preset hands control back to the unit. Any on, off or percentage command takes control again.
+While the preset is active the fan shows as on, with an unknown percentage.
+
+**The service always starts in Unit default** (divider), after a restart of the service or the Pi,
+until Home Assistant sends a command. It also falls back to the divider whenever it stops or
+fails, see [Fail-safe](#fail-safe).
+
+Speed to voltage, set with `COMFOFAN_VOLTAGE_RANGE`. Only off gives 0 V:
+
+| Range | 1 % | 50 % | 100 % | Formula (1–100 %) |
+| --- | --- | --- | --- | --- |
+| `0-10` (default) | 0.1 V | 5.0 V | 10 V | N / 10 V |
+| `1-10` | 1.09 V | 5.5 V | 10 V | 1 + 9 × N / 100 V |
 
 MQTT topics, under `comfofan/stork_comfofan_s/`:
 
@@ -180,8 +186,10 @@ MQTT topics, under `comfofan/stork_comfofan_s/`:
 | --- | --- | --- |
 | `set` | Command | `ON` / `OFF` |
 | `percentage/set` | Command | `0`–`100` |
+| `preset/set` | Command | `Unit default` |
 | `state` | State | `ON` / `OFF` |
-| `percentage` | State | `0`–`100` |
+| `percentage` | State | `0`–`100`, or `None` (unknown) in Unit default |
+| `preset` | State | `Unit default`, or `None` while Home Assistant is in control |
 | `availability` | State | `online` / `offline` (last will) |
 
 Discovery is published to `homeassistant/fan/stork_comfofan_s/config`. The service publishes
@@ -191,7 +199,9 @@ reconnects.
 
 ## Fail-safe
 
-The output must fall back to the divider whenever the software is not in control. The pigpio
+The output must fall back to the divider whenever the software is not in control, so the unit
+runs at its default speed. That includes the 0 V "off" state: if the software dies, the fan comes
+back on at the default speed rather than staying off. The pigpio
 daemon keeps driving the pins after the script dies, so the project has four layers of
 protection:
 
@@ -208,7 +218,7 @@ protection:
 
 Both tools need the pigpio daemon. Run them with the venv's Python
 (`.venv/bin/python mv-interactive.py`, see
-[Running in a virtual environment](#running-in-a-virtual-environment)). Stop the service first
+[Development](#development)). Stop the service first
 (`sudo systemctl stop comfofan`) so they don't fight over the pins.
 
 - **`mv-interactive.py`:** interactive CLI to set and check the output by hand. It selects the
@@ -235,10 +245,31 @@ Use a meter with a high input impedance (10 MΩ) on `PWM_IN` and on the R6/R7 di
 low-impedance meter loads these nodes and shows readings that are too low. On the 1 kHz PWM a
 meter shows the average, so measure the levels at 0 % and 100 % duty.
 
+## Development
+
+Use a venv in the source tree. You don't need to activate it; run scripts with the venv's Python:
+
+```sh
+cd ~/src/comfofan
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pylint comfofan_mqtt.py
+```
+
+To run the service in the foreground, pass the settings as environment variables:
+
+```sh
+MQTT_HOST=localhost MQTT_USERNAME=comfofan MQTT_PASSWORD=change-me \
+  .venv/bin/python comfofan_mqtt.py
+```
+
+Press Ctrl+C to stop it. The script selects the divider on the way out. Stop the systemd
+service first if it is installed (`sudo systemctl stop comfofan`), so the two don't fight over
+the pins.
+
 ## Open items
 
 - Have a non-pigpiod mode with kernel PWM for Pi 5 support
-- Support 1-10V in addition to 0-10V
 
 ## License
 

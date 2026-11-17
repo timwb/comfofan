@@ -1,22 +1,76 @@
 [Unit]
-Description=Stork Comfofan S 0-10 V control (Home Assistant MQTT)
+Description=comfofan - Stork Comfofan S 0-10 V control (Home Assistant MQTT)
+Documentation=file:///opt/comfofan/README.md
+# All GPIO goes through pigpiod; without it the script can't drive the output.
 Requires=pigpiod.service
-After=pigpiod.service network-online.target
 Wants=network-online.target
+After=pigpiod.service network-online.target mosquitto.service
 
 [Service]
+# The script reports READY=1 via sd_notify and pings the watchdog every 15 s, after checking that pigpiod
+# still answers. If it hangs, systemd kills it and ExecStopPost= below drops the relay.
 Type=notify
 NotifyAccess=main
-#User=homeautomation
-DynamicUser=yes
-ExecStart=/usr/local/share/homeautomation/.venv/bin/python /usr/local/share/homeautomation/comfofan_mqtt.py
+WatchdogSec=30
+
+# Base path: everything else is relative to it. systemd doesn't allow a relative or variable executable,
+# so /usr/bin/env resolves .venv/bin/python against the working directory.
+WorkingDirectory=/opt/comfofan
+ExecStart=/usr/bin/env .venv/bin/python comfofan_mqtt.py
+
+# Settings are read by systemd (as root), so the file can be root:root 0600.
 EnvironmentFile=/etc/homeautomation/comfofan.env
 Environment=PYTHONUNBUFFERED=1
+# The filesystem is read-only for the service; don't try to write __pycache__
+# Pre-compile once after each install instead (existing .pyc files are still read):
+#   sudo /opt/comfofan/.venv/bin/python -m compileall -q /opt/comfofan
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Fail-safe after a crash, kill or watchdog timeout: drive the relay (GPIO23) and PWM (GPIO18) low, so
+# the unit falls back to the divider. pinctrl writes the GPIO registers directly, so it works without
+# pigpiod. '+' runs it as root, outside the sandbox below; '-' ignores its exit code.
+# On Raspberry Pi OS Bullseye or older use /usr/bin/raspi-gpio set 23 op dl (and 18) instead.
 ExecStopPost=-+/usr/bin/pinctrl set 23 op dl
 ExecStopPost=-+/usr/bin/pinctrl set 18 op dl
-WatchdogSec=30
+
 Restart=on-failure
 RestartSec=5
+# Exit code 2 = configuration error: restarting won't help.
+RestartPreventExitStatus=2
+# On SIGTERM the script selects the divider and marks itself offline in MQTT.
+TimeoutStopSec=15
+
+# Run as a transient unprivileged user allocated at start; no system user needed. This also implies
+# NoNewPrivileges=yes, ProtectSystem=strict, ProtectHome=read-only, PrivateTmp=yes, RemoveIPC=yes and
+# RestrictSUIDSGID=yes. /opt/comfofan must be world-readable (the settings file need not be, see above).
+# The script reaches the pins through pigpiod over TCP (localhost:8888), so it needs no groups or devices.
+DynamicUser=yes
+
+# Hardening - run least-privilege
+# Not PrivateDevices=yes or ProtectClock=yes: they restrict device access for the whole unit
+# (DevicePolicy=closed / DeviceAllow=), including the '+' ExecStopPost= commands, so pinctrl could no
+# longer open /dev/gpiomem and the crash fail-safe would silently stop working.
+CapabilityBoundingSet=
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+PrivateUsers=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+# AF_INET/AF_INET6 for pigpiod and MQTT, AF_UNIX for journald and sd_notify.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
