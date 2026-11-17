@@ -115,6 +115,7 @@ class Output:
     self.pct = 0
     self.last_pct = DEFAULT_PCT
     pi.set_mode(RELAY_PIN, pigpio.OUTPUT)
+    pi.hardware_PWM(PWM_PIN, 0, 0)
     self.select_divider()
 
   def select_divider(self):
